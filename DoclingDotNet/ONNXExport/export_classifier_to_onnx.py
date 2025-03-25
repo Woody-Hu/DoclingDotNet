@@ -30,7 +30,10 @@ def export_model_to_onnx(model_path: str, onnx_path: str):
         do_constant_folding=True,# Optimize constant-folding
         input_names=['input'],   # Input tensor name
         output_names=['output'], # Output tensor name
-        dynamic_axes=None,       # No dynamic axes - fixed input shape
+        dynamic_axes={
+            'input': {0: 'batch_size'},  # Variable batch size
+            'output': {0: 'batch_size'}  # Variable batch size
+        }
     )
     
     print(f"Model exported successfully to: {onnx_path}")
