@@ -64,65 +64,71 @@ public class DocumentFigureClassifierPredictor : IDisposable
         };
     }
 
-    private DenseTensor<float> ProcessImage(Image<Rgb24> image)
+    private DenseTensor<float> ProcessImageBatch(IEnumerable<Image<Rgb24>> images)
     {
-        // Resize image to 224x224
-        image.Mutate(x => x.Resize(ImageSize, ImageSize));
+        var imageList = images.ToList();
+        var batchSize = imageList.Count;
+        
+        // Create tensor for variable batch size, 3 channels, height 224, width 224
+        var tensor = new DenseTensor<float>(new[] { batchSize, 3, ImageSize, ImageSize });
 
-        // Create tensor for batch size 1, 3 channels, height 224, width 224
-        var tensor = new DenseTensor<float>(new[] { 1, 3, ImageSize, ImageSize });
-
-        // Convert image to tensor with normalization
-        for (int y = 0; y < ImageSize; y++)
+        for (int b = 0; b < batchSize; b++)
         {
-            for (int x = 0; x < ImageSize; x++)
+            var image = imageList[b];
+            image.Mutate(x => x.Resize(ImageSize, ImageSize));
+
+            for (int y = 0; y < ImageSize; y++)
             {
-                var pixel = image[x, y];
-                // Convert RGB values to float and normalize
-                tensor[0, 0, y, x] = ((pixel.R / 255f) - ImageMean[0]) / ImageStd[0];
-                tensor[0, 1, y, x] = ((pixel.G / 255f) - ImageMean[1]) / ImageStd[1];
-                tensor[0, 2, y, x] = ((pixel.B / 255f) - ImageMean[2]) / ImageStd[2];
+                for (int x = 0; x < ImageSize; x++)
+                {
+                    var pixel = image[x, y];
+                    tensor[b, 0, y, x] = ((pixel.R / 255f) - ImageMean[0]) / ImageStd[0];
+                    tensor[b, 1, y, x] = ((pixel.G / 255f) - ImageMean[1]) / ImageStd[1];
+                    tensor[b, 2, y, x] = ((pixel.B / 255f) - ImageMean[2]) / ImageStd[2];
+                }
             }
         }
 
         return tensor;
     }
 
-    // Helper method to process multiple images
-    private IEnumerable<DenseTensor<float>> ProcessImages(IEnumerable<Image<Rgb24>> images)
-    {
-        return images.Select(img => ProcessImage(img));
-    }
-
     public List<List<(string Label, float Probability)>> Predict(IEnumerable<Image<Rgb24>> images)
     {
-        var tensorInputs = ProcessImages(images).ToList();
-        var result = new List<List<(string, float)>>();
-
-        foreach (var input in tensorInputs)
+        // Process all images in a single batch
+        var batchTensor = ProcessImageBatch(images);
+        
+        var inputMeta = _session.InputMetadata;
+        var inputName = inputMeta.Keys.First();
+        
+        var inputs = new List<NamedOnnxValue>
         {
-            var inputMeta = _session.InputMetadata;
-            var inputName = inputMeta.Keys.First();
-            
-            var inputs = new List<NamedOnnxValue>
+            NamedOnnxValue.CreateFromTensor(inputName, batchTensor)
+        };
+
+        // Single inference call for all images
+        using var outputs = _session.Run(inputs);
+        var logits = outputs.First().AsTensor<float>();
+        
+        var result = new List<List<(string, float)>>();
+        var batchSize = logits.Dimensions[0];
+        
+        // Process each image's results
+        for (int b = 0; b < batchSize; b++)
+        {
+            var imageLogits = new float[Classes.Length];
+            for (int i = 0; i < Classes.Length; i++)
             {
-                NamedOnnxValue.CreateFromTensor(inputName, input)
-            };
+                imageLogits[i] = logits[b, i];
+            }
 
-            var outputs = _session.Run(inputs);
-            var logits = outputs.First().AsTensor<float>();
-
-            // Convert logits to probabilities using softmax
-            var probabilities = Softmax(logits.ToArray());
-
-            // Create predictions list with class labels and probabilities
+            var probabilities = Softmax(imageLogits);
             var predictions = new List<(string, float)>();
+            
             for (int i = 0; i < Classes.Length; i++)
             {
                 predictions.Add((Classes[i], probabilities[i]));
             }
 
-            // Sort by probability in descending order
             predictions.Sort((a, b) => b.Item2.CompareTo(a.Item2));
             result.Add(predictions);
         }
